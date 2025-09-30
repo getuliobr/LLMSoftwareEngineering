@@ -22,8 +22,6 @@ history = [
     ("system", f"You are a helpful assistant that helps people find information in a database of GitHub issues. Use the tools to answer questions. The database schema is as follows:\n```sql\n{SCHEMA_SQL}```"),
 ]
 
-summarizeToolCallsSystemPrompt = ("system", "You are a helpful assistant that summarizes the tool calls so far in a concise way, focusing on the questions asked and the answers given. The summary should be brief and keeping the important details")
-
 while msg := input("Enter your question (or 'exit' to quit): "):
     
     if msg.lower() == 'exit':
@@ -59,5 +57,5 @@ while msg := input("Enter your question (or 'exit' to quit): "):
                     print(f"Error invoking tool {tool_name} (attempt {i+1}/3): {e}")
 
         history.append(llm_with_tools.invoke(history))
-    
+    history.append(llm.invoke(history + [("user", f"Provide a final answer based on the information gathered.\nDo not use any tools.\nThe user asked: {msg}")]))
     print(history[-1].content)
