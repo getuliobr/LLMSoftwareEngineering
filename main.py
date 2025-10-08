@@ -22,10 +22,18 @@ agent = create_react_agent(
     checkpointer=InMemorySaver()
 )
 
-config = {"configurable": {"thread_id": "1"}}
+config = {
+    "configurable": {"thread_id": "1"},
+    "recursion_limit": 100
+}
+
 while msg := input("Enter your question (or 'exit' to quit): "):
     if msg.lower() == 'exit':
         break
-    response = agent.invoke({'messages': [{'role': 'user', 'content': msg}]}, config=config)
-    ai_response = response['messages'][-1].content
-    print("Assistant:", ai_response)
+
+    for step in agent.stream(
+        {"messages": [{"role": "user", "content": msg}]},
+        config,
+        stream_mode="values",
+    ):
+        step["messages"][-1].pretty_print()
