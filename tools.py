@@ -8,6 +8,20 @@ import requests
 from bs4 import BeautifulSoup
 
 @tool
+def github_search(query: str):
+    """Perform a GitHub issue search using the GitHub API and return the top 30 results in JSON format.
+
+    Args:
+        query (str): The search query, e.g., "repo:octocat/Hello-World is:issue is:open bug"
+    """
+    print(f"Searching GitHub for: {query}")
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    r = requests.get(f"https://api.github.com/search/issues?q={query}", headers=headers)
+    if r.status_code == 200:
+        return json.dumps(r.json().get("items", []), indent=2)
+    return '{}'
+
+@tool
 def sql_query_executor(query: str):
     """Execute a SQL query against the GitHub issues database (sqlite) and return the results as JSON.
     Knowing that the database schema is as follows:

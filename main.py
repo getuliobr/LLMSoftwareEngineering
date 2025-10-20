@@ -16,10 +16,12 @@ agent = create_react_agent(
         sql_query_executor,
         get_user_info,
         web_search,
+        github_search,
         visit_url,
         get_repository_issue_info,
     ],
-    checkpointer=InMemorySaver()
+    checkpointer=InMemorySaver(),
+    prompt=SystemMessage(content=system_prompt),
 )
 
 config = {
