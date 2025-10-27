@@ -9,15 +9,17 @@ from bs4 import BeautifulSoup
 from logger import logger
 
 @tool
-def github_search(query: str):
+def github_search(query: str, sort: str = 'created', order: str = 'asc'):
     """Perform a GitHub issue search using the GitHub API and return the top 30 results in JSON format.
 
     Args:
-        query (str): The search query, e.g., "repo:octocat/Hello-World is:issue is:open bug"
+        query (str): The search query that DOEST NOT include sorting arguments. Example of search: "repo:octocat/Hello-World is:issue is:open bug" to search for open issues labeled "bug" in the octocat/Hello-World repository.
+        sort (str): The field to sort results by. Default is 'created'. Options include 'comments', 'created', 'updated'.
+        order (str): The order of sorting. 'asc' for ascending, 'desc' for descending. Default is 'asc'.
     """
     logger.info(f"Searching GitHub for: {query}", extra={"role": "github_search", "tool_name": "github_search"})
     headers = {"Accept": "application/vnd.github.v3+json"}
-    r = requests.get(f"https://api.github.com/search/issues?q={query}", headers=headers)
+    r = requests.get(f"https://api.github.com/search/issues?q={query}&sort={sort}&order={order}", headers=headers)
     if r.status_code == 200:
         return json.dumps(r.json().get("items", []), indent=2)
     return '{}'
