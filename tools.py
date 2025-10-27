@@ -6,6 +6,7 @@ from pathlib import Path
 from ddgs import DDGS
 import requests
 from bs4 import BeautifulSoup
+from logger import logger
 
 @tool
 def github_search(query: str):
@@ -14,7 +15,7 @@ def github_search(query: str):
     Args:
         query (str): The search query, e.g., "repo:octocat/Hello-World is:issue is:open bug"
     """
-    print(f"Searching GitHub for: {query}")
+    logger.info(f"Searching GitHub for: {query}", extra={"role": "github_search", "tool_name": "github_search"})
     headers = {"Accept": "application/vnd.github.v3+json"}
     r = requests.get(f"https://api.github.com/search/issues?q={query}", headers=headers)
     if r.status_code == 200:
@@ -78,7 +79,7 @@ def sql_query_executor(query: str):
     Args:
         query (str): The SQL query to execute.
     """
-    print(f"Executing SQL query: {query}")
+    logger.info(f"Executing SQL query: {query}", extra={"role": "sql_query_executor", "tool_name": "sql_query_executor"})
     sqlite_file = Path('./issues.sqlite')
     with sqlite3.connect(sqlite_file) as conn:
         cursor = conn.execute(query)
@@ -132,7 +133,7 @@ def get_user_info(name: str):
     Args:
         name (str): GitHub username.
     """
-    print(f"Fetching user info for: {name}")
+    logger.info(f"Fetching user info for: {name}", extra={"role": "get_user_info", "tool_name": "get_user_info"})
     r = requests.get(f"https://api.github.com/users/{name}")
     if r.status_code == 200:
         essencial_data = {
@@ -156,7 +157,7 @@ def web_search(query: str):
     Args:
         query (str): The search query.
     """
-    print(f"Searching: {query}")
+    logger.info(f"Searching: {query}", extra={"role": "web_search", "tool_name": "web_search"})
 
     results = DDGS().text(query, max_results=10)
     return json.dumps(results, indent=2)
@@ -171,7 +172,7 @@ def get_repository_directory_structure(owner: str, repo: str):
     """
 
     try:
-        print(f"Fetching repository: {owner}/{repo} directory structure")
+        logger.info(f"Fetching repository: {owner}/{repo} directory structure", extra={"role": "get_repository_directory_structure", "tool_name": "get_repository_directory_structure"})
         r = requests.get(f"https://gitingest.com/api/ingest", json={
                 "input_text":f"https://github.com/{owner}/{repo}",
                 "token":"",
@@ -277,7 +278,7 @@ def get_repository_issue_info(owner: str, repo: str, issue_number: int):
     """
 
     try:
-        print(f"Fetchin {owner}/{repo} issue: {issue_number}")
+        logger.info(f"Fetching {owner}/{repo} issue: {issue_number}", extra={"role": "get_repository_issue_info", "tool_name": "get_repository_issue_info"})
         r = requests.get(f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}")
         if r.status_code == 200:
             essential_data = {
@@ -313,7 +314,7 @@ def visit_url(url: str):
         url (str): The URL to visit.
     """
     try:
-        print(f"Visiting URL: {url}")
+        logger.info(f"Visiting URL: {url}", extra={"role": "visit_url", "tool_name": "visit_url"})
         r = requests.get(url, timeout=10)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
