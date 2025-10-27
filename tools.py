@@ -6,6 +6,7 @@ from pathlib import Path
 from ddgs import DDGS
 import requests
 from bs4 import BeautifulSoup
+from logger import logger
 
 @tool
 def github_search(query: str):
@@ -14,7 +15,7 @@ def github_search(query: str):
     Args:
         query (str): The search query, e.g., "repo:octocat/Hello-World is:issue is:open bug"
     """
-    print(f"Searching GitHub for: {query}")
+    logger.info(f"Searching GitHub for: {query}", extra={"role": "github_search", "tool_name": "github_search"})
     headers = {"Accept": "application/vnd.github.v3+json"}
     r = requests.get(f"https://api.github.com/search/issues?q={query}", headers=headers)
     if r.status_code == 200:
@@ -78,7 +79,7 @@ def sql_query_executor(query: str):
     Args:
         query (str): The SQL query to execute.
     """
-    print(f"Executing SQL query: {query}")
+    logger.info(f"Executing SQL query: {query}", extra={"role": "sql_query_executor", "tool_name": "sql_query_executor"})
     sqlite_file = Path('./issues.sqlite')
     with sqlite3.connect(sqlite_file) as conn:
         cursor = conn.execute(query)
@@ -132,10 +133,22 @@ def get_user_info(name: str):
     Args:
         name (str): GitHub username.
     """
-    print(f"Fetching user info for: {name}")
+    logger.info(f"Fetching user info for: {name}", extra={"role": "get_user_info", "tool_name": "get_user_info"})
     r = requests.get(f"https://api.github.com/users/{name}")
     if r.status_code == 200:
-        return json.dumps(r.json(), indent=2)
+        essencial_data = {
+            "login": r.json().get("login"),
+            "url": r.json().get("url"),
+            "html_url": r.json().get("html_url"),
+            "name": r.json().get("name"),
+            "company": r.json().get("company"),
+            "blog": r.json().get("blog"),
+            "location": r.json().get("location"),
+            "public_repos": r.json().get("public_repos"),
+            "email": r.json().get("email"),
+            "type": r.json().get("type")
+        }
+        return json.dumps(essencial_data, indent=2)
     return '{}'
 
 @tool
@@ -144,7 +157,7 @@ def web_search(query: str):
     Args:
         query (str): The search query.
     """
-    print(f"Searching: {query}")
+    logger.info(f"Searching: {query}", extra={"role": "web_search", "tool_name": "web_search"})
 
     results = DDGS().text(query, max_results=10)
     return json.dumps(results, indent=2)
@@ -159,7 +172,7 @@ def get_repository_directory_structure(owner: str, repo: str):
     """
 
     try:
-        print(f"Fetching repository: {owner}/{repo} directory structure")
+        logger.info(f"Fetching repository: {owner}/{repo} directory structure", extra={"role": "get_repository_directory_structure", "tool_name": "get_repository_directory_structure"})
         r = requests.get(f"https://gitingest.com/api/ingest", json={
                 "input_text":f"https://github.com/{owner}/{repo}",
                 "token":"",
@@ -265,10 +278,31 @@ def get_repository_issue_info(owner: str, repo: str, issue_number: int):
     """
 
     try:
-        print(f"Fetchin {owner}/{repo} issue: {issue_number}")
-        r = requests.get(f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number} ")
+        logger.info(f"Fetching {owner}/{repo} issue: {issue_number}", extra={"role": "get_repository_issue_info", "tool_name": "get_repository_issue_info"})
+        r = requests.get(f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_number}")
         if r.status_code == 200:
-            return json.dumps(r.json(), indent=2)
+            essential_data = {
+                "url": r.json().get("url"),
+                "repository_url": r.json().get("repository_url"),
+                "comments_url": r.json().get("comments_url"),
+                "events_url": r.json().get("events_url"),
+                "html_url": r.json().get("html_url"),
+                "id": r.json().get("id"),
+                "number": r.json().get("number"),
+                "title": r.json().get("title"),
+                "user": r.json().get("user")["login"] if r.json().get("user") else None,
+                "labels": [label.get("name") for label in r.json().get("labels", [])],
+                "state": r.json().get("state"),
+                "assignees": [assignee.get("login") for assignee in r.json().get("assignees", [])],
+                "comments": r.json().get("comments"),
+                "created_at": r.json().get("created_at"),
+                "updated_at": r.json().get("updated_at"),
+                "closed_at": r.json().get("closed_at"),
+                "body": r.json().get("body"),
+                "closed_by": r.json().get("closed_by")["login"] if r.json().get("closed_by") else None,
+                "timeline_url": r.json().get("timeline_url")
+            }
+            return json.dumps(essential_data, indent=2)
         return '{}'
     except Exception as e:
         return f"Error fetching repository info: {e}"
@@ -280,7 +314,7 @@ def visit_url(url: str):
         url (str): The URL to visit.
     """
     try:
-        print(f"Visiting URL: {url}")
+        logger.info(f"Visiting URL: {url}", extra={"role": "visit_url", "tool_name": "visit_url"})
         r = requests.get(url, timeout=10)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
