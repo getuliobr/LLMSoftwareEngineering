@@ -1,4 +1,6 @@
 import json
+import os
+import psycopg2
 import requests
 from langchain_core.tools import tool
 import sqlite3
@@ -7,6 +9,8 @@ from ddgs import DDGS
 import requests
 from bs4 import BeautifulSoup
 from logger import logger
+from dotenv import load_dotenv
+load_dotenv()
 
 @tool
 def github_search(query: str, sort: str = 'created', order: str = 'asc'):
@@ -82,13 +86,23 @@ def sql_query_executor(query: str):
         query (str): The SQL query to execute.
     """
     logger.info(f"Executing SQL query: {query}", extra={"role": "sql_query_executor", "tool_name": "sql_query_executor"})
-    sqlite_file = Path('./issues.sqlite')
-    with sqlite3.connect(sqlite_file) as conn:
-        cursor = conn.execute(query)
-        rows = cursor.fetchall()
-        columns = [description[0] for description in cursor.description]
-        results = [dict(zip(columns, row)) for row in rows]
-        return json.dumps(results, indent=2)
+    database_type = os.environ.get('DATABASE_TYPE', 'sqlite').lower()
+    if database_type == 'postgresql':
+        with psycopg2.connect(os.environ['DATABASE_URL'], options='-c default_transaction_read_only=on') as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(query)
+                rows = cursor.fetchall()
+                columns = [desc[0] for desc in cursor.description]
+                results = [dict(zip(columns, row)) for row in rows]
+                return json.dumps(results, indent=2)
+    else:
+        sqlite_file = Path('./issues.sqlite')
+        with sqlite3.connect(sqlite_file) as conn:
+            cursor = conn.execute(query)
+            rows = cursor.fetchall()
+            columns = [description[0] for description in cursor.description]
+            results = [dict(zip(columns, row)) for row in rows]
+            return json.dumps(results, indent=2)
 
 @tool
 def get_user_info(name: str):
