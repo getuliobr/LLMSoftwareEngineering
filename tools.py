@@ -12,6 +12,123 @@ from logger import logger
 from dotenv import load_dotenv
 load_dotenv()
 
+database_type = os.environ.get('DATABASE_TYPE', 'sqlite').lower()
+
+def get_schema_doc(db_type: str) -> str:
+    if db_type == "sqlite":
+        return """
+        ```sql
+        PRAGMA foreign_keys = ON;
+
+        CREATE TABLE IF NOT EXISTS users (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            name     TEXT NOT NULL UNIQUE
+        );
+
+        CREATE TABLE IF NOT EXISTS labels (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            name     TEXT NOT NULL UNIQUE
+        );
+
+        CREATE TABLE IF NOT EXISTS issues (
+            id              INTEGER PRIMARY KEY,
+            number          INTEGER,
+            title           TEXT NOT NULL,
+            state           TEXT,
+            author_id       INTEGER,
+            created_at      TEXT,
+            updated_at      TEXT,
+            closed_at       TEXT,
+            comments_count  INTEGER,
+            url             TEXT UNIQUE,
+            FOREIGN KEY(author_id) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS issue_assignees (
+            issue_id   INTEGER NOT NULL,
+            user_id    INTEGER NOT NULL,
+            PRIMARY KEY (issue_id, user_id),
+            FOREIGN KEY(issue_id) REFERENCES issues(id) ON DELETE CASCADE,
+            FOREIGN KEY(user_id)  REFERENCES users(id)  ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS issue_labels (
+            issue_id   INTEGER NOT NULL,
+            label_id   INTEGER NOT NULL,
+            PRIMARY KEY (issue_id, label_id),
+            FOREIGN KEY(issue_id) REFERENCES issues(id) ON DELETE CASCADE,
+            FOREIGN KEY(label_id) REFERENCES labels(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_issues_number   ON issues(number);
+        CREATE INDEX IF NOT EXISTS idx_issues_state    ON issues(state);
+        CREATE INDEX IF NOT EXISTS idx_issues_author   ON issues(author_id);
+        CREATE INDEX IF NOT EXISTS idx_issue_assignees_user ON issue_assignees(user_id);
+        CREATE INDEX IF NOT EXISTS idx_issue_labels_label   ON issue_labels(label_id);
+        ```
+        """
+    elif db_type == "postgresql":
+        return """
+        ```sql
+        CREATE TABLE IF NOT EXISTS users (
+            id       SERIAL PRIMARY KEY,
+            name     TEXT NOT NULL UNIQUE
+        );
+
+        CREATE TABLE IF NOT EXISTS labels (
+            id       SERIAL PRIMARY KEY,
+            name     TEXT NOT NULL UNIQUE
+        );
+
+        CREATE TABLE IF NOT EXISTS issues (
+            id              INTEGER PRIMARY KEY,
+            number          INTEGER,
+            title           TEXT NOT NULL,
+            state           TEXT,
+            author_id       INTEGER,
+            created_at      TIMESTAMP,
+            updated_at      TIMESTAMP,
+            closed_at       TIMESTAMP,
+            comments_count  INTEGER,
+            url             TEXT UNIQUE,
+            FOREIGN KEY(author_id) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS issue_assignees (
+            issue_id   INTEGER NOT NULL,
+            user_id    INTEGER NOT NULL,
+            PRIMARY KEY (issue_id, user_id),
+            FOREIGN KEY(issue_id) REFERENCES issues(id) ON DELETE CASCADE,
+            FOREIGN KEY(user_id)  REFERENCES users(id)  ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS issue_labels (
+            issue_id   INTEGER NOT NULL,
+            label_id   INTEGER NOT NULL,
+            PRIMARY KEY (issue_id, label_id),
+            FOREIGN KEY(issue_id) REFERENCES issues(id) ON DELETE CASCADE,
+            FOREIGN KEY(label_id) REFERENCES labels(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_issues_number ON issues(number);
+        CREATE INDEX IF NOT EXISTS idx_issues_state ON issues(state);
+        CREATE INDEX IF NOT EXISTS idx_issues_author ON issues(author_id);
+        CREATE INDEX IF NOT EXISTS idx_issue_assignees_user ON issue_assignees(user_id);
+        CREATE INDEX IF NOT EXISTS idx_issue_labels_label ON issue_labels(label_id);
+        ```
+        """
+    
+schema_doc = get_schema_doc(database_type)
+sql_query_executor_doc = f"""
+Execute a SQL query against the GitHub issues database ({database_type}) and return the results as JSON.
+Knowing that the database schema is as follows:
+
+{schema_doc}
+
+Args:
+    query (str): The SQL query to execute.
+"""
+
 @tool
 def github_search(query: str, sort: str = 'created', order: str = 'asc'):
     """Perform a GitHub issue search using the GitHub API and return the top 30 results in JSON format.
@@ -28,65 +145,9 @@ def github_search(query: str, sort: str = 'created', order: str = 'asc'):
         return json.dumps(r.json().get("items", []), indent=2)
     return '{}'
 
-@tool
+@tool(description=sql_query_executor_doc)
 def sql_query_executor(query: str):
-    """Execute a SQL query against the GitHub issues database (sqlite) and return the results as JSON.
-    Knowing that the database schema is as follows:
-    ```sql
-    PRAGMA foreign_keys = ON;
-
-    CREATE TABLE IF NOT EXISTS users (
-        id       INTEGER PRIMARY KEY AUTOINCREMENT,
-        name     TEXT NOT NULL UNIQUE
-    );
-
-    CREATE TABLE IF NOT EXISTS labels (
-        id       INTEGER PRIMARY KEY AUTOINCREMENT,
-        name     TEXT NOT NULL UNIQUE
-    );
-
-    CREATE TABLE IF NOT EXISTS issues (
-        id              INTEGER PRIMARY KEY,
-        number          INTEGER,
-        title           TEXT NOT NULL,
-        state           TEXT,
-        author_id       INTEGER,
-        created_at      TEXT,
-        updated_at      TEXT,
-        closed_at       TEXT,
-        comments_count  INTEGER,
-        url             TEXT UNIQUE,
-        FOREIGN KEY(author_id) REFERENCES users(id)
-    );
-
-    CREATE TABLE IF NOT EXISTS issue_assignees (
-        issue_id   INTEGER NOT NULL,
-        user_id    INTEGER NOT NULL,
-        PRIMARY KEY (issue_id, user_id),
-        FOREIGN KEY(issue_id) REFERENCES issues(id) ON DELETE CASCADE,
-        FOREIGN KEY(user_id)  REFERENCES users(id)  ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS issue_labels (
-        issue_id   INTEGER NOT NULL,
-        label_id   INTEGER NOT NULL,
-        PRIMARY KEY (issue_id, label_id),
-        FOREIGN KEY(issue_id) REFERENCES issues(id) ON DELETE CASCADE,
-        FOREIGN KEY(label_id) REFERENCES labels(id) ON DELETE CASCADE
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_issues_number   ON issues(number);
-    CREATE INDEX IF NOT EXISTS idx_issues_state    ON issues(state);
-    CREATE INDEX IF NOT EXISTS idx_issues_author   ON issues(author_id);
-    CREATE INDEX IF NOT EXISTS idx_issue_assignees_user ON issue_assignees(user_id);
-    CREATE INDEX IF NOT EXISTS idx_issue_labels_label   ON issue_labels(label_id);
-    ```
-
-    Args:
-        query (str): The SQL query to execute.
-    """
     logger.info(f"Executing SQL query: {query}", extra={"role": "sql_query_executor", "tool_name": "sql_query_executor"})
-    database_type = os.environ.get('DATABASE_TYPE', 'sqlite').lower()
     if database_type == 'postgresql':
         with psycopg2.connect(os.environ['DATABASE_URL'], options='-c default_transaction_read_only=on') as conn:
             with conn.cursor() as cursor:

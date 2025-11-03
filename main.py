@@ -1,20 +1,17 @@
-from reader import SCHEMA_SQL, load_csv_to_sqlite
 from langchain_ollama import ChatOllama
-from langgraph.prebuilt import create_react_agent
+# from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
 from langgraph.checkpoint.memory import InMemorySaver
 from tools import *
 import os
-from langchain_core.messages import SystemMessage     # Use isso caso queira definir um prompt de sistema diferente
-import os
 import logging
 from logger import logger
+from dotenv import load_dotenv
 
-# Verifica se o banco de dados SQLite já existe; se não, carrega os dados do CSV
-if not os.path.exists('issues.sqlite'):
-    load_csv_to_sqlite('data/data.csv', 'issues.sqlite')
-else:
-    print("Banco de dados SQLite já existe. Pulando o carregamento do CSV.")
+load_dotenv()
 
+database_type = os.getenv('DATABASE_TYPE', 'sqlite')
+database_url = os.getenv('DATABASE_URL', 'issues.sqlite')
 
 llm = ChatOllama(
     model="gpt-oss:20b",
@@ -22,7 +19,22 @@ llm = ChatOllama(
     num_ctx=128000,
 )
 
-agent = create_react_agent(
+prompt = (
+    f"Você é um assistente que sempre deve consultar a base de dados PostgreSQL definida em {os.getenv('DATABASE_URL')} "
+    "usando a ferramenta 'sql_query_executor' com a sintaxe do PostgreSQL antes de qualquer outra ação. "
+    "Sempre tente responder a pergunta consultando essa base primeiro. "
+    "Somente se a informação não estiver lá, use outras ferramentas. "
+    "Evite chamadas desnecessárias e pare quando tiver informações suficientes."
+) if database_type == 'postgresql' else (
+    "Você é um assistente que sempre deve verificar a base de dados SQLite 'issues.sqlite' "
+    "usando a ferramenta 'sql_query_executor' antes de qualquer outra ação. "
+    "Sempre tente responder a pergunta consultando essa base primeiro. "
+    "Somente se a informação não estiver lá, use outras ferramentas. "
+    "Evite chamadas desnecessárias e pare quando tiver informações suficientes."
+)
+        
+
+agent = create_agent(
     llm,
     tools=[
         sql_query_executor,
@@ -33,15 +45,7 @@ agent = create_react_agent(
         get_repository_issue_info,
     ],
     checkpointer=InMemorySaver(),
-    prompt=SystemMessage(
-       content=(
-            "Você é um assistente que sempre deve verificar a base de dados SQLite 'issues.sqlite' "
-            "usando a ferramenta 'sql_query_executor' antes de qualquer outra ação. "
-            "Sempre tente responder a pergunta consultando essa base primeiro. "
-            "Somente se a informação não estiver lá, use outras ferramentas. "
-            "Evite chamadas desnecessárias e pare quando tiver informações suficientes."
-        )
-    )
+    system_prompt=prompt
 )
 
 config = {
@@ -62,7 +66,6 @@ while msg := input("Enter your question (or 'exit' to quit): "):
         last_msg = step["messages"][-1]
         role = getattr(last_msg, "type", getattr(last_msg, "role", "unknown"))
         tool_name = getattr(last_msg, "name", None)
-        # last_msg.pretty_print()
         logger.info(last_msg.content, extra={"role": role, "tool_name": tool_name})
         
         if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:

@@ -1,41 +1,78 @@
 import sqlite3
+import psycopg2
+from psycopg2.extras import execute_values
 from pathlib import Path
 from typing import Optional, Iterable
 import pandas as pd
+import os
+from dotenv import load_dotenv
 
-# --- your existing reader ---
+load_dotenv()
+
 def read_issues_csv(csv_file):
     df = pd.read_csv(csv_file)
-
-    # Convert date columns to datetime (nullable)
     for col in ["CREATED_AT", "UPDATED_AT", "CLOSED_AT"]:
         df[col] = pd.to_datetime(df[col], errors="coerce")
-
-    # Lists split on ';'
     df["LABELS"] = df["LABELS"].fillna("").apply(lambda x: [lbl.strip() for lbl in str(x).split(";") if lbl.strip()])
     df["ASSIGNEES"] = df["ASSIGNEES"].fillna("").apply(lambda x: [a.strip() for a in str(x).split(";") if a.strip()])
-
     return df
 
-with open("schema.sql", "r", encoding="utf-8") as f:
-    SCHEMA_SQL = f.read()
 
-def ensure_schema(conn: sqlite3.Connection):
-    conn.executescript(SCHEMA_SQL)
+def is_sqlite(conn) -> bool:
+    return isinstance(conn, sqlite3.Connection)
 
-def upsert_user(conn: sqlite3.Connection, name: Optional[str]) -> Optional[int]:
+def execute_sql(conn, query: str, params=None):
+    if is_sqlite(conn):
+        cur = conn.cursor()
+        cur.execute(query, params or [])
+        return cur
+    else:
+        cur = conn.cursor()
+        cur.execute(query, params or [])
+        return cur
+
+def ensure_schema(conn):
+
+    if is_sqlite(conn):
+        filename = "schema_sqlite.sql"
+    else:
+        filename = "schema_postgres.sql"
+
+    with open(filename, "r", encoding="utf-8") as f:
+        schema_sql = f.read()
+
+    if is_sqlite(conn):
+        conn.executescript(schema_sql)
+    else:
+        with conn.cursor() as cur:
+            cur.execute(schema_sql)
+        conn.commit()
+
+def upsert_user(conn, name: Optional[str]) -> Optional[int]:
     if not name:
         return None
-    conn.execute("INSERT OR IGNORE INTO users(name) VALUES (?)", (name,))
-    row = conn.execute("SELECT id FROM users WHERE name = ?", (name,)).fetchone()
+
+    if is_sqlite(conn):
+        execute_sql(conn, "INSERT OR IGNORE INTO users(name) VALUES (?)", (name,))
+        row = execute_sql(conn, "SELECT id FROM users WHERE name = ?", (name,)).fetchone()
+    else:
+        execute_sql(conn, "INSERT INTO users(name) VALUES (%s) ON CONFLICT (name) DO NOTHING", (name,))
+        row = execute_sql(conn, "SELECT id FROM users WHERE name = %s", (name,)).fetchone()
+
     return row[0] if row else None
 
-def upsert_label(conn: sqlite3.Connection, name: str) -> int:
-    conn.execute("INSERT OR IGNORE INTO labels(name) VALUES (?)", (name,))
-    row = conn.execute("SELECT id FROM labels WHERE name = ?", (name,)).fetchone()
+
+def upsert_label(conn, name: str) -> int:
+    if is_sqlite(conn):
+        execute_sql(conn, "INSERT OR IGNORE INTO labels(name) VALUES (?)", (name,))
+        row = execute_sql(conn, "SELECT id FROM labels WHERE name = ?", (name,)).fetchone()
+    else:
+        execute_sql(conn, "INSERT INTO labels(name) VALUES (%s) ON CONFLICT (name) DO NOTHING", (name,))
+        row = execute_sql(conn, "SELECT id FROM labels WHERE name = %s", (name,)).fetchone()
+
     return row[0]
 
-def insert_issue(conn: sqlite3.Connection,
+def insert_issue(conn,
                  issue_id: int,
                  number: Optional[int],
                  title: str,
@@ -46,110 +83,118 @@ def insert_issue(conn: sqlite3.Connection,
                  closed_at_iso: Optional[str],
                  comments_count: Optional[int],
                  url: Optional[str]):
-    conn.execute(
-        """
-        INSERT OR REPLACE INTO issues(
-            id, number, title, state, author_id,
-            created_at, updated_at, closed_at, comments_count, url
+    
+    if is_sqlite(conn):
+        execute_sql(
+            conn,
+            """
+            INSERT OR REPLACE INTO issues(
+                id, number, title, state, author_id,
+                created_at, updated_at, closed_at, comments_count, url
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (issue_id, number, title, state, author_id,
+             created_at_iso, updated_at_iso, closed_at_iso,
+             comments_count, url)
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            int(issue_id) if issue_id is not None else None,
-            int(number) if pd.notna(number) else None,
-            title,
-            state if state else None,
-            author_id,
-            created_at_iso,
-            updated_at_iso,
-            closed_at_iso,
-            int(comments_count) if pd.notna(comments_count) else None,
-            url if url else None,
-        ),
-    )
+    else:
+        execute_sql(
+            conn,
+            """
+            INSERT INTO issues(
+                id, number, title, state, author_id,
+                created_at, updated_at, closed_at, comments_count, url
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET
+                number = EXCLUDED.number,
+                title = EXCLUDED.title,
+                state = EXCLUDED.state,
+                author_id = EXCLUDED.author_id,
+                created_at = EXCLUDED.created_at,
+                updated_at = EXCLUDED.updated_at,
+                closed_at = EXCLUDED.closed_at,
+                comments_count = EXCLUDED.comments_count,
+                url = EXCLUDED.url
+            """,
+            (issue_id, number, title, state, author_id,
+             created_at_iso, updated_at_iso, closed_at_iso,
+             comments_count, url)
+        )
 
-def link_many_to_many(conn: sqlite3.Connection,
-                      issue_id: int,
-                      labels: Iterable[str],
-                      assignees: Iterable[str]):
-    # Labels
+def link_many_to_many(conn, issue_id: int, labels: Iterable[str], assignees: Iterable[str]):
     for lbl in labels or []:
         lbl_id = upsert_label(conn, lbl)
-        conn.execute(
-            "INSERT OR IGNORE INTO issue_labels(issue_id, label_id) VALUES (?, ?)",
-            (issue_id, lbl_id),
-        )
-    # Assignees
+        if is_sqlite(conn):
+            execute_sql(conn, "INSERT OR IGNORE INTO issue_labels(issue_id, label_id) VALUES (?, ?)", (issue_id, lbl_id))
+        else:
+            execute_sql(conn, "INSERT INTO issue_labels(issue_id, label_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (issue_id, lbl_id))
+
     for ass in assignees or []:
         uid = upsert_user(conn, ass)
         if uid is not None:
-            conn.execute(
-                "INSERT OR IGNORE INTO issue_assignees(issue_id, user_id) VALUES (?, ?)",
-                (issue_id, uid),
-            )
+            if is_sqlite(conn):
+                execute_sql(conn, "INSERT OR IGNORE INTO issue_assignees(issue_id, user_id) VALUES (?, ?)", (issue_id, uid))
+            else:
+                execute_sql(conn, "INSERT INTO issue_assignees(issue_id, user_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (issue_id, uid))
 
-def load_csv_to_sqlite(csv_path: str, sqlite_path: str = "issues.sqlite"):
+def load_csv_to_db(csv_path: str, db_url_or_path: str, use_postgres: bool = False):
     df = read_issues_csv(csv_path)
 
-    # Convert timestamps to ISO strings (SQLite stores TEXT)
     def iso(x):
-        if pd.isna(x):
-            return None
-        # ensure UTC-naive ISO 8601 string (or keep timezone if present)
-        return pd.to_datetime(x).isoformat()
+        return None if pd.isna(x) else pd.to_datetime(x).isoformat()
 
-    sqlite_file = Path(sqlite_path)
-    with sqlite3.connect(sqlite_file) as conn:
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        ensure_schema(conn)
+    # Conecta
+    if use_postgres:
+        print("🔗 Conectando ao PostgreSQL...")
+        conn = psycopg2.connect(db_url_or_path)
+    else:
+        print("🔗 Conectando ao SQLite...")
+        conn = sqlite3.connect(db_url_or_path)
 
-        with conn:  # transaction
-            # Pre-insert unique authors for a small speedup (optional)
-            unique_authors = sorted(set(a for a in df["AUTHOR"].fillna("") if a))
-            conn.executemany(
-                "INSERT OR IGNORE INTO users(name) VALUES (?)",
-                [(a,) for a in unique_authors]
-            )
+    ensure_schema(conn)
 
-            for _, row in df.iterrows():
-                issue_id = int(row["ID"])
-                number = row.get("NUMBER")
-                title = str(row.get("TITLE") or "").strip()
-                state = (row.get("STATE") or "").strip() or None
-                author_name = (row.get("AUTHOR") or "").strip() or None
-                created_at_iso = iso(row.get("CREATED_AT"))
-                updated_at_iso = iso(row.get("UPDATED_AT"))
-                closed_at_iso  = iso(row.get("CLOSED_AT"))
-                comments_count = row.get("COMMENTS")
-                url = (row.get("URL") or "").strip() or None
+    # Pré-insere autores únicos
+    unique_authors = sorted(set(a for a in df["AUTHOR"].fillna("") if a))
+    if use_postgres:
+        with conn.cursor() as cur:
+            execute_values(cur, "INSERT INTO users(name) VALUES %s ON CONFLICT DO NOTHING", [(a,) for a in unique_authors])
+        conn.commit()
+    else:
+        conn.executemany("INSERT OR IGNORE INTO users(name) VALUES (?)", [(a,) for a in unique_authors])
 
-                # Author → users table
-                author_id = upsert_user(conn, author_name) if author_name else None
+    # Processa issues
+    for i, row in df.iterrows():
+        issue_id = int(row["NUMBER"])
+        number = row.get("NUMBER")
+        title = str(row.get("TITLE") or "").strip() or f"Issue {issue_id}"
+        state = (row.get("STATE") or "").strip() or None
+        author_name = (row.get("AUTHOR") or "").strip() or None
+        created_at_iso = iso(row.get("CREATED_AT"))
+        updated_at_iso = iso(row.get("UPDATED_AT"))
+        closed_at_iso = iso(row.get("CLOSED_AT"))
+        comments_count = row.get("COMMENTS")
+        url = (row.get("URL") or "").strip() or None
 
-                # Insert/replace issue
-                insert_issue(
-                    conn,
-                    issue_id=issue_id,
-                    number=number,
-                    title=title or f"Issue {issue_id}",
-                    state=state,
-                    author_id=author_id,
-                    created_at_iso=created_at_iso,
-                    updated_at_iso=updated_at_iso,
-                    closed_at_iso=closed_at_iso,
-                    comments_count=comments_count,
-                    url=url,
-                )
+        author_id = upsert_user(conn, author_name) if author_name else None
+        insert_issue(conn, issue_id, number, title, state, author_id,
+                     created_at_iso, updated_at_iso, closed_at_iso,
+                     comments_count, url)
+        link_many_to_many(conn, issue_id, row.get("LABELS") or [], row.get("ASSIGNEES") or [])
 
-                # Link labels & assignees
-                labels = row.get("LABELS") or []
-                assignees = row.get("ASSIGNEES") or []
-                link_many_to_many(conn, issue_id, labels, assignees)
+        if use_postgres and (i + 1) % 100 == 0:
+            conn.commit()
 
-    print(f"Loaded {len(df)} issues into {sqlite_file.resolve()}")
+    conn.commit()
+    conn.close()
+
+    print(f"✅ {len(df)} issues carregadas com sucesso!")
 
 if __name__ == "__main__":
-    # Example usage:
-    # load_csv_to_sqlite("jabref.csv", "issues.sqlite")
+    # SQLite
+    # load_csv_to_db("jabref.csv", "issues.sqlite", use_postgres=False)
+
+    # PostgreSQL
+    # load_csv_to_db("jabref.csv", os.getenv("DATABASE_URL"), use_postgres=True)
     pass
