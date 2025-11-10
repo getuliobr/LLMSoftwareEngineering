@@ -221,7 +221,7 @@ def sql_query_executor(query: str):
                 results = [dict(zip(columns, row)) for row in rows]
                 return json.dumps(results, indent=2, default=str)
     else:
-        sqlite_file = Path('./issues.sqlite')
+        sqlite_file = Path('./msr_challenge.sqlite')
         with sqlite3.connect(sqlite_file) as conn:
             cursor = conn.execute(query)
             rows = cursor.fetchall()
