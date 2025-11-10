@@ -17,6 +17,7 @@ llm = ChatOllama(
     model="gpt-oss:20b",
     reasoning="medium",
     num_ctx=128000,
+    base_url='http://localhost:11434'
 )
 
 prompt = (
@@ -25,15 +26,8 @@ prompt = (
     "Sempre tente responder a pergunta consultando essa base primeiro. "
     "Somente se a informação não estiver lá, use outras ferramentas. "
     "Evite chamadas desnecessárias e pare quando tiver informações suficientes."
-) if database_type == 'postgresql' else (
-    "Você é um assistente que sempre deve verificar a base de dados SQLite 'issues.sqlite' "
-    "usando a ferramenta 'sql_query_executor' antes de qualquer outra ação. "
-    "Sempre tente responder a pergunta consultando essa base primeiro. "
-    "Somente se a informação não estiver lá, use outras ferramentas. "
-    "Evite chamadas desnecessárias e pare quando tiver informações suficientes."
 )
         
-
 agent = create_agent(
     llm,
     tools=[
