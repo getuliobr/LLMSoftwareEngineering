@@ -9,15 +9,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-def read_issues_csv(csv_file):
-    df = pd.read_csv(csv_file)
-    for col in ["CREATED_AT", "UPDATED_AT", "CLOSED_AT"]:
-        df[col] = pd.to_datetime(df[col], errors="coerce")
-    df["LABELS"] = df["LABELS"].fillna("").apply(lambda x: [lbl.strip() for lbl in str(x).split(";") if lbl.strip()])
-    df["ASSIGNEES"] = df["ASSIGNEES"].fillna("").apply(lambda x: [a.strip() for a in str(x).split(";") if a.strip()])
-    return df
-
-
 def is_sqlite(conn) -> bool:
     return isinstance(conn, sqlite3.Connection)
 
@@ -32,9 +23,9 @@ def execute_sql(conn, query: str, params=None):
         return cur
 
 def ensure_schema(conn):
-
     if is_sqlite(conn):
-        filename = "schema_sqlite.sql"
+        # FIXED: Changed filename to match what you saved
+        filename = "msr_challenge.sql"
     else:
         filename = "schema_postgres.sql"
 
@@ -42,159 +33,189 @@ def ensure_schema(conn):
         schema_sql = f.read()
 
     if is_sqlite(conn):
+        # Temporarily disable foreign keys during schema creation
+        conn.execute("PRAGMA foreign_keys = OFF")
         conn.executescript(schema_sql)
+        conn.execute("PRAGMA foreign_keys = ON")
     else:
         with conn.cursor() as cur:
             cur.execute(schema_sql)
         conn.commit()
 
-def upsert_user(conn, name: Optional[str]) -> Optional[int]:
-    if not name:
-        return None
-
-    if is_sqlite(conn):
-        execute_sql(conn, "INSERT OR IGNORE INTO users(name) VALUES (?)", (name,))
-        row = execute_sql(conn, "SELECT id FROM users WHERE name = ?", (name,)).fetchone()
-    else:
-        execute_sql(conn, "INSERT INTO users(name) VALUES (%s) ON CONFLICT (name) DO NOTHING", (name,))
-        row = execute_sql(conn, "SELECT id FROM users WHERE name = %s", (name,)).fetchone()
-
-    return row[0] if row else None
-
-
-def upsert_label(conn, name: str) -> int:
-    if is_sqlite(conn):
-        execute_sql(conn, "INSERT OR IGNORE INTO labels(name) VALUES (?)", (name,))
-        row = execute_sql(conn, "SELECT id FROM labels WHERE name = ?", (name,)).fetchone()
-    else:
-        execute_sql(conn, "INSERT INTO labels(name) VALUES (%s) ON CONFLICT (name) DO NOTHING", (name,))
-        row = execute_sql(conn, "SELECT id FROM labels WHERE name = %s", (name,)).fetchone()
-
-    return row[0]
-
-def insert_issue(conn,
-                 issue_id: int,
-                 number: Optional[int],
-                 title: str,
-                 state: Optional[str],
-                 author_id: Optional[int],
-                 created_at_iso: Optional[str],
-                 updated_at_iso: Optional[str],
-                 closed_at_iso: Optional[str],
-                 comments_count: Optional[int],
-                 url: Optional[str]):
+def safe_insert_df(conn, df: pd.DataFrame, table_name: str, batch_size: int = 1000):
+    """Safely insert dataframe into table with batch processing"""
+    if df is None or df.empty:
+        print(f"⚠️  No data to insert for {table_name}")
+        return 0
     
-    if is_sqlite(conn):
-        execute_sql(
-            conn,
-            """
-            INSERT OR REPLACE INTO issues(
-                id, number, title, state, author_id,
-                created_at, updated_at, closed_at, comments_count, url
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (issue_id, number, title, state, author_id,
-             created_at_iso, updated_at_iso, closed_at_iso,
-             comments_count, url)
-        )
-    else:
-        execute_sql(
-            conn,
-            """
-            INSERT INTO issues(
-                id, number, title, state, author_id,
-                created_at, updated_at, closed_at, comments_count, url
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (id) DO UPDATE SET
-                number = EXCLUDED.number,
-                title = EXCLUDED.title,
-                state = EXCLUDED.state,
-                author_id = EXCLUDED.author_id,
-                created_at = EXCLUDED.created_at,
-                updated_at = EXCLUDED.updated_at,
-                closed_at = EXCLUDED.closed_at,
-                comments_count = EXCLUDED.comments_count,
-                url = EXCLUDED.url
-            """,
-            (issue_id, number, title, state, author_id,
-             created_at_iso, updated_at_iso, closed_at_iso,
-             comments_count, url)
-        )
-
-def link_many_to_many(conn, issue_id: int, labels: Iterable[str], assignees: Iterable[str]):
-    for lbl in labels or []:
-        lbl_id = upsert_label(conn, lbl)
-        if is_sqlite(conn):
-            execute_sql(conn, "INSERT OR IGNORE INTO issue_labels(issue_id, label_id) VALUES (?, ?)", (issue_id, lbl_id))
-        else:
-            execute_sql(conn, "INSERT INTO issue_labels(issue_id, label_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (issue_id, lbl_id))
-
-    for ass in assignees or []:
-        uid = upsert_user(conn, ass)
-        if uid is not None:
+    # Convert datetime columns to ISO format strings
+    for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            df[col] = df[col].apply(lambda x: None if pd.isna(x) else x.isoformat())
+    
+    # Replace NaN with None for proper NULL handling
+    df = df.where(pd.notnull(df), None)
+    
+    try:
+        total_inserted = 0
+        for i in range(0, len(df), batch_size):
+            batch = df.iloc[i:i+batch_size]
+            
             if is_sqlite(conn):
-                execute_sql(conn, "INSERT OR IGNORE INTO issue_assignees(issue_id, user_id) VALUES (?, ?)", (issue_id, uid))
+                batch.to_sql(table_name, conn, if_exists='append', index=False)
             else:
-                execute_sql(conn, "INSERT INTO issue_assignees(issue_id, user_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (issue_id, uid))
+                # FIXED: Correct execute_values usage for PostgreSQL
+                cols = ','.join(batch.columns)
+                insert_query = f"INSERT INTO {table_name} ({cols}) VALUES %s"
+                
+                with conn.cursor() as cur:
+                    execute_values(cur, insert_query, batch.values.tolist())
+            
+            total_inserted += len(batch)
+            if (i + batch_size) % 5000 == 0:
+                print(f"   ... {total_inserted} rows inserted")
+                # FIXED: Commit for both SQLite and PostgreSQL periodically
+                conn.commit()
+        
+        # FIXED: Commit for both databases at end of table
+        conn.commit()
+            
+        print(f"✅ Inserted {total_inserted:,} rows into {table_name}")
+        return total_inserted
+        
+    except Exception as e:
+        print(f"❌ Error inserting into {table_name}: {e}")
+        if not is_sqlite(conn):
+            conn.rollback()
+        return 0
 
-def load_csv_to_db(csv_path: str, db_url_or_path: str, use_postgres: bool = False):
-    df = read_issues_csv(csv_path)
+def print_dataset_columns(dataset_base: str, load_sequence: list):
+    """Print columns for each dataset to compare with schema"""
+    print("\n" + "="*60)
+    print("📋 DATASET COLUMN ANALYSIS")
+    print("="*60 + "\n")
+    
+    for item in load_sequence:
+        table_name = item[0]
+        parquet_files = item[1:] if len(item) > 2 else [item[1]]
+        
+        for parquet_file in parquet_files:
+            try:
+                file_path = f"{dataset_base}/{parquet_file}"
+                df = pd.read_parquet(file_path)
+                print(f"Table: {table_name} (from {parquet_file})")
+                print(f"Columns ({len(df.columns)}): {', '.join(df.columns)}")
+                print(f"Row count: {len(df):,}\n")
+                break
+            except Exception as e:
+                if len(parquet_files) > 1:
+                    continue
+                else:
+                    print(f"❌ Could not load {parquet_file}: {e}\n")
+                    break
+    
+    print("="*60 + "\n")
 
-    def iso(x):
-        return None if pd.isna(x) else pd.to_datetime(x).isoformat()
-
-    # Conecta
+def load_hf_dataset_to_db(db_url_or_path: str, use_postgres: bool = False, debug_columns: bool = False):
+    """Load AIDev dataset from HuggingFace into database"""
+    
+    # Connect to database
     if use_postgres:
-        print("🔗 Conectando ao PostgreSQL...")
+        print("🔗 Connecting to PostgreSQL...")
         conn = psycopg2.connect(db_url_or_path)
     else:
-        print("🔗 Conectando ao SQLite...")
+        print("🔗 Connecting to SQLite...")
         conn = sqlite3.connect(db_url_or_path)
+        # Disable foreign keys during bulk load for SQLite
 
-    ensure_schema(conn)
+        # Ensure schema exists
+        print("📋 Creating schema...")
+        ensure_schema(conn)
+        conn.execute("PRAGMA foreign_keys = OFF")
 
-    # Pré-insere autores únicos
-    unique_authors = sorted(set(a for a in df["AUTHOR"].fillna("") if a))
-    if use_postgres:
-        with conn.cursor() as cur:
-            execute_values(cur, "INSERT INTO users(name) VALUES %s ON CONFLICT DO NOTHING", [(a,) for a in unique_authors])
-        conn.commit()
-    else:
-        conn.executemany("INSERT OR IGNORE INTO users(name) VALUES (?)", [(a,) for a in unique_authors])
+    dataset_base = "hf://datasets/hao-li/AIDev"
+    
+    # Define load order (respecting foreign key dependencies)
+    load_sequence = [
+        ("user", "all_user.parquet"),
+        ("repository", "all_repository.parquet"),
+        ("pull_request", "all_pull_request.parquet"),
+        ("pr_task_type", "pr_task_type.parquet"),
+        ("pr_reviews", "pr_reviews.parquet"),
+        ("pr_review_comments", "pr_review_comments_v2.parquet", "pr_review_comments.parquet"),  # Try v2 first
+        ("pr_comments", "pr_comments.parquet"),
+        ("issue", "issue.parquet"),
+        ("related_issue", "related_issue.parquet"),
+        ("pr_commits", "pr_commits.parquet"),
+        ("pr_timeline", "pr_timeline.parquet"),
+        ("pr_commit_details", "pr_commit_details.parquet"),
+    ]
 
-    # Processa issues
-    for i, row in df.iterrows():
-        issue_id = int(row["NUMBER"])
-        number = row.get("NUMBER")
-        title = str(row.get("TITLE") or "").strip() or f"Issue {issue_id}"
-        state = (row.get("STATE") or "").strip() or None
-        author_name = (row.get("AUTHOR") or "").strip() or None
-        created_at_iso = iso(row.get("CREATED_AT"))
-        updated_at_iso = iso(row.get("UPDATED_AT"))
-        closed_at_iso = iso(row.get("CLOSED_AT"))
-        comments_count = row.get("COMMENTS")
-        url = (row.get("URL") or "").strip() or None
+    # If debug mode, print columns and exit
+    if debug_columns:
+        print_dataset_columns(dataset_base, load_sequence)
+        conn.close()
+        return
 
-        author_id = upsert_user(conn, author_name) if author_name else None
-        insert_issue(conn, issue_id, number, title, state, author_id,
-                     created_at_iso, updated_at_iso, closed_at_iso,
-                     comments_count, url)
-        link_many_to_many(conn, issue_id, row.get("LABELS") or [], row.get("ASSIGNEES") or [])
+    print("\n📦 Loading datasets from HuggingFace...\n")
+    
+    stats = {}
+    
+    for item in load_sequence:
+        table_name = item[0]
+        parquet_files = item[1:] if len(item) > 2 else [item[1]]
+        
+        print(f"📥 Loading {table_name}...")
+        
+        df = None
+        for parquet_file in parquet_files:
+            try:
+                file_path = f"{dataset_base}/{parquet_file}"
+                df = pd.read_parquet(file_path)
+                print(f"   Found {len(df):,} rows in {parquet_file}")
+                break
+            except Exception as e:
+                if len(parquet_files) > 1:
+                    print(f"   ⚠️  Could not load {parquet_file}, trying alternative...")
+                    continue
+                else:
+                    print(f"   ❌ Error loading {parquet_file}: {e}")
+                    break
+        
+        if df is not None:
+            count = safe_insert_df(conn, df, table_name)
+            stats[table_name] = count
+        else:
+            stats[table_name] = 0
+        
+        print()
 
-        if use_postgres and (i + 1) % 100 == 0:
-            conn.commit()
-
+    # Final commit
     conn.commit()
+    
+    # Re-enable foreign keys for SQLite
+    if is_sqlite(conn):
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.commit()
+    
+    # Print summary statistics
+    print("\n" + "="*50)
+    print("📊 DATABASE STATISTICS")
+    print("="*50)
+    
+    for table_name, count in stats.items():
+        print(f"{table_name:.<30} {count:>15,} rows")
+    
+    print("="*50)
+    print(f"✅ Total rows loaded: {sum(stats.values()):,}")
+    print("="*50 + "\n")
+    
     conn.close()
-
-    print(f"✅ {len(df)} issues carregadas com sucesso!")
+    print("🎉 All data loaded successfully!")
 
 if __name__ == "__main__":
-    # SQLite
-    # load_csv_to_db("jabref.csv", "issues.sqlite", use_postgres=False)
-
-    # PostgreSQL
-    # load_csv_to_db("jabref.csv", os.getenv("DATABASE_URL"), use_postgres=True)
-    pass
+    # First run with debug_columns=True to see what columns exist
+    # load_hf_dataset_to_db("msr_challenge.sqlite", use_postgres=False, debug_columns=True)
+    
+    # Then run the actual load
+    load_hf_dataset_to_db("msr_challenge.sqlite", use_postgres=False)
