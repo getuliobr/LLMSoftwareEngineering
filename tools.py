@@ -23,12 +23,15 @@ def github_search(query: str, sort: str = 'created', order: str = 'asc'):
         sort (str): The field to sort results by. Default is 'created'. Options include 'comments', 'created', 'updated'.
         order (str): The order of sorting. 'asc' for ascending, 'desc' for descending. Default is 'asc'.
     """
-    logger.info(f"Searching GitHub for: {query}", extra={"role": "github_search", "tool_name": "github_search"})
-    headers = {"Accept": "application/vnd.github.v3+json"}
-    r = requests.get(f"https://api.github.com/search/issues?q={query}&sort={sort}&order={order}", headers=headers)
-    if r.status_code == 200:
-        return json.dumps(r.json().get("items", []), indent=2)
-    return '{}'
+    try:
+        logger.info(f"Searching GitHub for: {query}", extra={"role": "github_search", "tool_name": "github_search"})
+        headers = {"Accept": "application/vnd.github.v3+json"}
+        r = requests.get(f"https://api.github.com/search/issues?q={query}&sort={sort}&order={order}", headers=headers)
+        if r.status_code == 200:
+            return json.dumps(r.json().get("items", []), indent=2)
+        return '{}'
+    except Exception as e:
+        return f"Error performing GitHub search: {e}"
 
 @tool()
 def sql_query_executor(query: str):
@@ -211,23 +214,26 @@ def sql_query_executor(query: str):
     Args:
         query (str): The SQL query to execute.
     """
-    logger.info(f"Executing SQL query: {query}", extra={"role": "sql_query_executor", "tool_name": "sql_query_executor"})
-    if database_type == 'postgresql':
-        with psycopg2.connect(os.environ['DATABASE_URL'], options='-c default_transaction_read_only=on') as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(query)
+    try:
+        logger.info(f"Executing SQL query: {query}", extra={"role": "sql_query_executor", "tool_name": "sql_query_executor"})
+        if database_type == 'postgresql':
+            with psycopg2.connect(os.environ['DATABASE_URL'], options='-c default_transaction_read_only=on') as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(query)
+                    rows = cursor.fetchall()
+                    columns = [desc[0] for desc in cursor.description]
+                    results = [dict(zip(columns, row)) for row in rows]
+                    return json.dumps(results, indent=2, default=str)
+        else:
+            sqlite_file = Path('./msr_challenge.sqlite')
+            with sqlite3.connect(sqlite_file) as conn:
+                cursor = conn.execute(query)
                 rows = cursor.fetchall()
-                columns = [desc[0] for desc in cursor.description]
+                columns = [description[0] for description in cursor.description]
                 results = [dict(zip(columns, row)) for row in rows]
-                return json.dumps(results, indent=2, default=str)
-    else:
-        sqlite_file = Path('./msr_challenge.sqlite')
-        with sqlite3.connect(sqlite_file) as conn:
-            cursor = conn.execute(query)
-            rows = cursor.fetchall()
-            columns = [description[0] for description in cursor.description]
-            results = [dict(zip(columns, row)) for row in rows]
-            return json.dumps(results, indent=2)
+                return json.dumps(results, indent=2)
+    except Exception as e:
+        return f"Error executing SQL query: {e}"
 
 @tool
 def get_user_info(name: str):
