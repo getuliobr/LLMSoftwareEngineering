@@ -17,7 +17,6 @@ llm = ChatOllama(
     model="gpt-oss:120b",
     reasoning="high",
     num_ctx=128000,
-    base_url='http://localhost:11435'
 )
 
 prompt = (

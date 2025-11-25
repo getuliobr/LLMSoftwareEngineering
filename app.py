@@ -16,10 +16,8 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 
 if "agent" not in st.session_state:
-    database_url = os.getenv('DATABASE_URL', 'issues.sqlite')
-    
     llm = ChatOllama(
-        model="gpt-oss:20b",
+        model="gpt-oss:120b",
         reasoning="high",
         num_ctx=128000,
     )
@@ -94,10 +92,7 @@ if prompt := st.chat_input("Enter your question..."):
             last_msg = step["messages"][-1]
             last_msg_additional_kwargs = last_msg.additional_kwargs if hasattr(last_msg, "additional_kwargs") else {}
             role = getattr(last_msg, "type", getattr(last_msg, "role", "unknown"))
-            
-            # Check for reasoning
-            if hasattr(last_msg_additional_kwargs, "reasoning_content") and last_msg_additional_kwargs['reasoning_content']:
-                reasoning_text = last_msg_additional_kwargs['reasoning_content']
+            reasoning_text = last_msg_additional_kwargs.get('reasoning_content', "")
             
             # Check for tool calls
             if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
@@ -105,7 +100,7 @@ if prompt := st.chat_input("Enter your question..."):
                 for tool_call in last_msg.tool_calls:
                     tool_name = tool_call.get("name", "unknown")
                     tool_args = tool_call.get("args", {})
-                    tool_calls_list.append((tool_name, tool_args))
+                    tool_calls_list.append((reasoning_text, tool_name, tool_args))
             
             # Get final content
             if role == "ai" and hasattr(last_msg, "content"):
@@ -120,8 +115,9 @@ if prompt := st.chat_input("Enter your question..."):
         # Show tool calls
         if tool_calls_list:
             with st.expander(f"🔧 Tool Calls ({len(tool_calls_list)})"):
-                for i, (tool_name, tool_args) in enumerate(tool_calls_list, 1):
-                    st.write(f"{i}. {tool_name} with args {tool_args}")
+                for i, (reasoning_text, tool_name, tool_args) in enumerate(tool_calls_list, 1):
+                    args = ", ".join(f"{k}={v}" for k, v in tool_args.items())
+                    st.write(f"{i}. {reasoning_text} -> {tool_name}({args})")
         
         # Show summary
         summary = f"Total tool calls: {tool_call_count}"
