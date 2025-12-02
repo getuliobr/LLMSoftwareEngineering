@@ -17,13 +17,14 @@ if "messages" not in st.session_state:
 
 if "agent" not in st.session_state:
     llm = ChatOllama(
-        model="gpt-oss:120b",
-        reasoning="high",
-        num_ctx=128000,
+        model=os.getenv('OLLAMA_MODEL'),
+        reasoning=os.getenv('OLLAMA_REASONING'),
+        num_ctx=int(os.getenv('OLLAMA_NUM_CTX')),
+        base_url=os.getenv('OLLAMA_BASE_URL')
     )
-    
+ 
     prompt = (
-        f"Você é um assistente que sempre deve consultar a base de dados PostgreSQL definida em {os.getenv('DATABASE_URL')} "
+        f"Você é um assistente que sempre deve preferir consultar a base de dados PostgreSQL"
         "usando a ferramenta 'sql_query_executor' com a sintaxe do PostgreSQL antes de qualquer outra ação. "
         "Sempre tente responder a pergunta consultando essa base primeiro. "
         "Somente se a informação não estiver lá, use outras ferramentas. "
