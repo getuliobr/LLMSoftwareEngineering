@@ -3,7 +3,6 @@ import os
 import psycopg2
 import requests
 from langchain_core.tools import tool
-import sqlite3
 from pathlib import Path
 from ddgs import DDGS
 import requests
@@ -11,8 +10,6 @@ from bs4 import BeautifulSoup
 from logger import logger
 from dotenv import load_dotenv
 load_dotenv()
-
-database_type = os.environ.get('DATABASE_TYPE', 'sqlite').lower()
 
 @tool
 def github_search(query: str, sort: str = 'created', order: str = 'asc'):
@@ -38,200 +35,253 @@ def sql_query_executor(query: str):
     """Execute a SQL query against the GitHub data postgresql database and return the results as JSON.
     Knowing that the database schema is as follows:
     ```sql
-    -- =========================================
-    -- Core entities
-    -- =========================================
+    -- Enum Types for issue state and reason
+    -- This guarantees that the values are consistent and constrained in the columns state and state_reason.
 
-    CREATE TABLE user (
-        id         INTEGER PRIMARY KEY,
-        login      TEXT,
-        followers  INTEGER,
-        following  INTEGER,
-        created_at TIMESTAMP
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'issue_state') THEN
+            CREATE TYPE issue_state AS ENUM ('open', 'closed');
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'issue_state_reason') THEN
+            CREATE TYPE issue_state_reason AS ENUM ('completed', 'not_planned', 'reopened');
+        END IF;
+    END$$;
+
+    -- Table: public.repositories
+    -- Store general information and metrics about GitHub repositories.
+    -- Primary key (owner, name) uniquely identifies each repository.
+
+    CREATE TABLE IF NOT EXISTS public.repositories
+    (
+        owner             VARCHAR(255) NOT NULL,
+        name              VARCHAR(255) NOT NULL,
+        description       TEXT,
+        url               TEXT,
+        license           VARCHAR(100),
+        language          VARCHAR(100),
+        stars             INTEGER NOT NULL DEFAULT 0,
+        forks             INTEGER NOT NULL DEFAULT 0,
+        open_issues_count INTEGER NOT NULL DEFAULT 0,
+        total_issues_count INTEGER NOT NULL DEFAULT 0,
+        created_at        TIMESTAMPTZ NOT NULL,
+        updated_at        TIMESTAMPTZ,
+        
+        CONSTRAINT repositories_pkey PRIMARY KEY (owner, name)
     );
 
-    CREATE TABLE repository (
-        id        INTEGER PRIMARY KEY,
-        url       TEXT,
-        license   TEXT,
-        full_name TEXT,
-        language  TEXT,
-        forks     INTEGER,
-        stars     INTEGER
+    COMMENT ON TABLE public.repositories IS 'Armazena informações gerais e métricas sobre repositórios do GitHub.';
+
+
+    -- Table: public.issues
+    -- Store issues for GitHub repositories.
+    -- Has a foreign key to repositories (owner, name).
+
+    CREATE TABLE IF NOT EXISTS public.issues
+    (
+        id                 VARCHAR(255) NOT NULL,
+        "number"           INTEGER NOT NULL,
+        title              TEXT NOT NULL,
+        body               TEXT,
+        author             VARCHAR(255),
+        state              issue_state NOT NULL,
+        url                TEXT,
+        created_at         TIMESTAMPTZ NOT NULL,
+        updated_at         TIMESTAMPTZ NOT NULL,
+        closed_at          TIMESTAMPTZ,
+        comments_count     INTEGER NOT NULL DEFAULT 0,
+        closed_by          VARCHAR(255),
+        state_reason       issue_state_reason,
+        
+        -- Columns to identify the repository
+        repository_owner   VARCHAR(255) NOT NULL,
+        repository_name    VARCHAR(255) NOT NULL,
+        
+        -- Constraints
+        CONSTRAINT issues_pkey PRIMARY KEY (id),
+        CONSTRAINT fk_issues_to_repositories 
+            FOREIGN KEY (repository_owner, repository_name)
+            REFERENCES public.repositories (owner, name)
+            ON DELETE CASCADE -- Se um repositório for deletado, suas issues também serão.
     );
 
-    CREATE TABLE issue (
-        id         INTEGER PRIMARY KEY,
-        number     INTEGER,
-        title      TEXT,
-        body       TEXT,
-        user       TEXT,
-        state      TEXT,
-        created_at TIMESTAMP,
-        closed_at  TIMESTAMP,
-        html_url   TEXT
+    CREATE INDEX IF NOT EXISTS idx_issues_repository ON public.issues (repository_owner, repository_name);
+    CREATE INDEX IF NOT EXISTS idx_issues_author ON public.issues (author);
+    CREATE INDEX IF NOT EXISTS idx_issues_state ON public.issues (state);
+
+    -- Enum Type for pull request state
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'pull_request_state') THEN
+            CREATE TYPE pull_request_state AS ENUM ('OPEN', 'CLOSED', 'MERGED');
+        END IF;
+    END$$;
+
+    -- Table: public.pull_requests
+    -- Store pull requests for GitHub repositories.
+
+    CREATE TABLE IF NOT EXISTS public.pull_requests
+    (
+        id                  VARCHAR(255) PRIMARY KEY,
+        "number"            INTEGER NOT NULL,
+        title               TEXT NOT NULL,
+        body                TEXT,
+        author              VARCHAR(255),
+        state               pull_request_state NOT NULL,
+        url                 VARCHAR(2048) NOT NULL,
+        is_draft            BOOLEAN NOT NULL,
+        created_at          TIMESTAMPTZ NOT NULL,
+        updated_at          TIMESTAMPTZ NOT NULL,
+        closed_at           TIMESTAMPTZ,
+        merged_at           TIMESTAMPTZ,
+        commits_count       INTEGER NOT NULL,
+        additions           INTEGER NOT NULL,
+        deletions           INTEGER NOT NULL,
+        changed_files       INTEGER NOT NULL,
+        base_ref_name       VARCHAR(255),
+        head_ref_name       VARCHAR(255),
+        associated_issue_id VARCHAR(255),
+
+        repository_owner    VARCHAR(255) NOT NULL,
+        repository_name     VARCHAR(255) NOT NULL,
+
+        CONSTRAINT fk_pull_requests_to_repositories
+            FOREIGN KEY (repository_owner, repository_name)
+            REFERENCES public.repositories (owner, name)
+            ON DELETE CASCADE,
+        CONSTRAINT fk_pull_requests_to_issues
+            FOREIGN KEY (associated_issue_id)
+            REFERENCES public.issues (id)
+            ON DELETE SET NULL
     );
 
-    CREATE TABLE pull_request (
-        id         INTEGER PRIMARY KEY,
-        number     INTEGER,
-        title      TEXT,
-        body       TEXT,
-        agent      TEXT,
-        user_id    INTEGER,
-        user       TEXT,
-        state      TEXT,
-        created_at TIMESTAMP,
-        closed_at  TIMESTAMP,
-        merged_at  TIMESTAMP,
-        repo_id    INTEGER,
-        repo_url   TEXT,
-        html_url   TEXT,
-        FOREIGN KEY (user_id) REFERENCES user(id),
-        FOREIGN KEY (repo_id) REFERENCES repository(id)
+    -- Table: public.labels
+    -- Store unique labels for issues and pull requests.
+
+    CREATE TABLE IF NOT EXISTS public.labels
+    (
+        name  VARCHAR(255) PRIMARY KEY,
+        color VARCHAR(7) NOT NULL
     );
 
-    -- =========================================
-    -- PR classification
-    -- =========================================
+    -- Table: public.issue_labels
+    -- Union table for the N:M relationship between issues and labels.
 
-    -- Uma linha por PR com a classificação de task type
-    CREATE TABLE pr_task_type (
-        id         INTEGER PRIMARY KEY,             -- PR id
-        agent      TEXT,
-        title      TEXT,
-        reason     TEXT,
-        type       TEXT,
-        confidence INTEGER,
-        FOREIGN KEY (id) REFERENCES pull_request(id)
+    CREATE TABLE IF NOT EXISTS public.issue_labels
+    (
+        issue_id  VARCHAR(255) NOT NULL,
+        label_name VARCHAR(255) NOT NULL,
+        CONSTRAINT pk_issue_labels PRIMARY KEY (issue_id, label_name),
+        CONSTRAINT fk_issue_labels_to_issues
+            FOREIGN KEY (issue_id)
+            REFERENCES public.issues (id)
+            ON DELETE CASCADE,
+        CONSTRAINT fk_issue_labels_to_labels
+            FOREIGN KEY (label_name)
+            REFERENCES public.labels (name)
+            ON DELETE CASCADE
     );
 
-    -- =========================================
-    -- Comments & reviews
-    -- =========================================
 
-    CREATE TABLE pr_comments (
-        id         INTEGER PRIMARY KEY,
-        pr_id      INTEGER,
-        user       TEXT,
-        user_id    INTEGER,
-        user_type  TEXT,
-        created_at TIMESTAMP,
-        body       TEXT,
-        FOREIGN KEY (pr_id)   REFERENCES pull_request(id),
-        FOREIGN KEY (user_id) REFERENCES user(id)
+    -- Table: public.pull_request_labels
+    -- Union table for the N:M relationship between pull_requests and labels.
+
+    CREATE TABLE IF NOT EXISTS public.pull_request_labels
+    (
+        pull_request_id  VARCHAR(255) NOT NULL,
+        label_name VARCHAR(255) NOT NULL,
+        CONSTRAINT pk_pull_request_labels PRIMARY KEY (pull_request_id, label_name),
+        CONSTRAINT fk_pull_request_labels_to_pull_requests
+            FOREIGN KEY (pull_request_id)
+            REFERENCES public.pull_requests (id)
+            ON DELETE CASCADE,
+        CONSTRAINT fk_pull_request_labels_to_labels
+            FOREIGN KEY (label_name)
+            REFERENCES public.labels (name)
+            ON DELETE CASCADE
     );
 
-    CREATE TABLE pr_reviews (
-        id           INTEGER PRIMARY KEY,
-        pr_id        INTEGER,
-        user         TEXT,
-        user_type    TEXT,
-        state        TEXT,
-        submitted_at TIMESTAMP,
-        body         TEXT,
-        FOREIGN KEY (pr_id) REFERENCES pull_request(id)
+    -- Table: public.comments
+    -- Store comments for issues and pull requests.
+
+    CREATE TABLE IF NOT EXISTS public.comments
+    (
+        id                  VARCHAR(255) PRIMARY KEY,
+        body                TEXT,
+        author              VARCHAR(255),
+        url                 VARCHAR(2048),
+        created_at          TIMESTAMPTZ,
+        updated_at          TIMESTAMPTZ,
+        issue_id            VARCHAR(255),
+        pull_request_id     VARCHAR(255),
+        repository_owner    VARCHAR(255) NOT NULL,
+        repository_name     VARCHAR(255) NOT NULL,
+        CONSTRAINT fk_comments_to_issues
+            FOREIGN KEY (issue_id)
+            REFERENCES public.issues (id)
+            ON DELETE CASCADE,
+        CONSTRAINT fk_comments_to_pull_requests
+            FOREIGN KEY (pull_request_id)
+            REFERENCES public.pull_requests (id)
+            ON DELETE CASCADE,
+        CONSTRAINT chk_comment_parent
+            CHECK ((issue_id IS NOT NULL AND pull_request_id IS NULL) OR (issue_id IS NULL AND pull_request_id IS NOT NULL))
     );
 
-    CREATE TABLE pr_review_comments (
-        id                     INTEGER PRIMARY KEY,
-        pull_request_review_id INTEGER,
-        user                   TEXT,
-        user_type              TEXT,
-        diff_hunk              TEXT,
-        path                   TEXT,
-        position               INTEGER,
-        original_position      INTEGER,
-        commit_id              TEXT,
-        original_commit_id     TEXT,
-        body                   TEXT,
-        pull_request_url       TEXT,
-        created_at             TIMESTAMP,
-        updated_at             TIMESTAMP,
-        in_reply_to_id         INTEGER,
-        FOREIGN KEY (pull_request_review_id) REFERENCES pr_reviews(id),
-        FOREIGN KEY (in_reply_to_id)         REFERENCES pr_review_comments(id)
+
+
+    -- Table: public.commits
+    -- Store commits for GitHub repositories.
+
+    CREATE TABLE IF NOT EXISTS public.commits
+    (
+        sha                VARCHAR(40) PRIMARY KEY,
+        message            TEXT NOT NULL,
+        author_name        VARCHAR(255),
+        authored_date      TIMESTAMPTZ NOT NULL,
+        committer_name     VARCHAR(255),
+        committed_date     TIMESTAMPTZ NOT NULL,
+        url                VARCHAR(2048),
+        additions          INTEGER NOT NULL,
+        deletions          INTEGER NOT NULL,
+        total_changed_files INTEGER NOT NULL,
+
+        -- Foreign to pull_requests (can be null)
+        pull_request_id    VARCHAR(255),
+
+        -- Columns to identify the repository
+        repository_owner   VARCHAR(255) NOT NULL,
+        repository_name    VARCHAR(255) NOT NULL,
+
+        -- Constraints
+        CONSTRAINT fk_commits_to_pull_requests
+            FOREIGN KEY (pull_request_id)
+            REFERENCES public.pull_requests (id)
+            ON DELETE SET NULL,
+
+        CONSTRAINT fk_commits_to_repositories
+            FOREIGN KEY (repository_owner, repository_name)
+            REFERENCES public.repositories (owner, name)
+            ON DELETE CASCADE
     );
 
-    -- =========================================
-    -- Commits & file-level details
-    -- =========================================
 
-    CREATE TABLE pr_commits (
-        id  INTEGER PRIMARY KEY AUTOINCREMENT, 
-        sha       TEXT,
-        pr_id     INTEGER,
-        author    TEXT,
-        committer TEXT,
-        message   TEXT,
-        FOREIGN KEY (pr_id) REFERENCES pull_request(id)
-    );
-
-    CREATE TABLE pr_commit_details (
-        id                     INTEGER PRIMARY KEY AUTOINCREMENT,
-        sha                    TEXT,
-        pr_id                  INTEGER,
-        author                 TEXT,
-        committer              TEXT,
-        message                TEXT,
-        commit_stats_total     INTEGER,
-        commit_stats_additions INTEGER,
-        commit_stats_deletions INTEGER,
-        filename               TEXT,
-        status                 TEXT,
-        additions              INTEGER,
-        deletions              INTEGER,
-        changes                INTEGER,
-        patch                  TEXT,
-        FOREIGN KEY (sha, pr_id) REFERENCES pr_commits(sha, pr_id)
-    );
-
-    -- =========================================
-    -- Timeline & issue relations
-    -- =========================================
-
-    CREATE TABLE pr_timeline (
-        pr_id      INTEGER,
-        event      TEXT,
-        commit_id  TEXT,
-        created_at TIMESTAMP,
-        actor      TEXT,
-        assignee   TEXT,
-        label      TEXT,
-        message    TEXT,
-        FOREIGN KEY (pr_id) REFERENCES pull_request(id)
-    );
-
-    CREATE TABLE related_issue (
-        id       INTEGER PRIMARY KEY AUTOINCREMENT,
-        pr_id    INTEGER,
-        issue_id INTEGER,
-        source   TEXT,
-        FOREIGN KEY (pr_id)    REFERENCES pull_request(id),
-        FOREIGN KEY (issue_id) REFERENCES issue(id)
-    );
+    CREATE INDEX IF NOT EXISTS idx_commits_repo ON public.commits(repository_owner, repository_name);
+    CREATE INDEX IF NOT EXISTS idx_commits_pull_request_id ON public.commits(pull_request_id);
+    CREATE INDEX IF NOT EXISTS idx_commits_author_name ON public.commits(author_name);
     ```
     Args:
         query (str): The SQL query to execute.
     """
     try:
         logger.info(f"Executing SQL query: {query}", extra={"role": "sql_query_executor", "tool_name": "sql_query_executor"})
-        if database_type == 'postgresql':
-            with psycopg2.connect(os.environ['DATABASE_URL'], options='-c default_transaction_read_only=on') as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute(query)
-                    rows = cursor.fetchall()
-                    columns = [desc[0] for desc in cursor.description]
-                    results = [dict(zip(columns, row)) for row in rows]
-                    return json.dumps(results, indent=2, default=str)
-        else:
-            sqlite_file = Path('./msr_challenge.sqlite')
-            with sqlite3.connect(sqlite_file) as conn:
-                cursor = conn.execute(query)
+        with psycopg2.connect(os.environ['DATABASE_URL'], options='-c default_transaction_read_only=on') as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(query)
                 rows = cursor.fetchall()
-                columns = [description[0] for description in cursor.description]
+                columns = [desc[0] for desc in cursor.description]
                 results = [dict(zip(columns, row)) for row in rows]
-                return json.dumps(results, indent=2)
+                return json.dumps(results, indent=2, default=str)
     except Exception as e:
         return f"Error executing SQL query: {e}"
 
