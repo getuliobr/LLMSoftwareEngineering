@@ -14,10 +14,9 @@ database_type = os.getenv('DATABASE_TYPE', 'sqlite')
 database_url = os.getenv('DATABASE_URL', 'issues.sqlite')
 
 llm = ChatOllama(
-    model="gpt-oss:20b",
-    reasoning="medium",
+    model="gpt-oss:120b",
+    reasoning="high",
     num_ctx=128000,
-    base_url='http://localhost:11434'
 )
 
 prompt = (
