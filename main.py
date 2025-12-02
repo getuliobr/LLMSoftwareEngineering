@@ -47,22 +47,38 @@ config = {
     "recursion_limit": 100
 }
 
-while msg := input("Enter your question (or 'exit' to quit): "):
-    if msg.lower() == 'exit':
-        break
-    
+def main_function(question: str):
+    final_answer = None
     tool_calls = 0
     for step in agent.stream(
-        {"messages": [{"role": "user", "content": msg}]},
+        {"messages": [{"role": "user", "content": question}]},
         config,
         stream_mode="values",
     ):
         last_msg = step["messages"][-1]
         role = getattr(last_msg, "type", getattr(last_msg, "role", "unknown"))
         tool_name = getattr(last_msg, "name", None)
+
+        if role == "ai":
+            final_answer = last_msg.content
+        
         logger.info(last_msg.content, extra={"role": role, "tool_name": tool_name})
+        
+        if last_msg.response_metadata:
+            metada = last_msg.response_metadata
+            logger.info(
+                f"Detalhes da resposta:\n"
+                f"Tempo total de {metada.get('total_duration', 'N/A') / 10**9} segundos\n"
+                f"Tempo de carregamento do modelo: {metada.get('load_duration', 'N/A') / 10**9} segundos\n"
+                f"Tokens de entrada: {metada.get('prompt_eval_count', 'N/A')}\n"
+                f"Tempo para processar tokens de entrada: {metada.get('prompt_eval_duration', 'N/A') / 10**9} segundos\n"
+                f"Tokens gerados: {metada.get('eval_count', 'N/A')}\n"
+                f"Tempo para gerar tokens: {metada.get('eval_duration', 'N/A') / 10**9} segundos\n"
+            , extra={"role": role, "tool_name": tool_name}
+            )
         
         if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
             tool_calls += 1
 
-    logger.info(f"Quantidade total de chamadas de ferramentas feitas para a pergunta [{msg}]: {tool_calls}", extra={"role": "summary", "tool_name": None})
+    logger.info(f"Quantidade total de chamadas de ferramentas feitas para a pergunta [{question}]: {tool_calls}", extra={"role": "summary", "tool_name": None})
+    return final_answer
