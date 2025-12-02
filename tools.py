@@ -3,12 +3,12 @@ import os
 import psycopg2
 import requests
 from langchain_core.tools import tool
-from pathlib import Path
 from ddgs import DDGS
 import requests
 from bs4 import BeautifulSoup
 from logger import logger
 from dotenv import load_dotenv
+
 load_dotenv()
 
 @tool
